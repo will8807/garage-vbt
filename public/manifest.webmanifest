@@ -1,0 +1,12 @@
+{
+  "name": "Garage VBT",
+  "short_name": "Garage VBT",
+  "description": "Velocity-based training for solo barbell lifters.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": []
+}
