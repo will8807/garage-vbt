@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../state/appStore';
 import { useSessionRepo } from '../../state/useSessionRepo';
@@ -6,7 +6,8 @@ import { createSetEngine } from '../../decision/engine';
 import { computePostSetRecommendation } from '../../decision/recommendation';
 import type { DecisionEvent } from '../../decision/events';
 import { createSimulatedLiveAnalyzer } from '../../cv/simulatedLiveAnalyzer';
-import type { LiveAnalyzerHandle } from '../../cv/types';
+import { createRealLiveAnalyzer } from '../../cv/realLiveAnalyzer';
+import type { LiveAnalyzer, LiveAnalyzerHandle } from '../../cv/types';
 import { createAudioFeedbackPlayer } from '../../audio/feedback';
 import { tones, unlockAudio } from '../../audio/tones';
 import { sayNumber } from '../../audio/speech';
@@ -26,6 +27,9 @@ export function RecordSet() {
   const repo = useSessionRepo();
   const activeSet = useAppStore((s) => s.activeSet);
   const audioMode = useAppStore((s) => s.audioMode);
+  const useRealCvExperimental = useAppStore((s) => s.useRealCvExperimental);
+  const markerDiameterMm = useAppStore((s) => s.markerDiameterMm);
+  const markerProfile = useAppStore((s) => s.markerProfile);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const setLastCompletedSet = useAppStore((s) => s.setLastCompletedSet);
 
@@ -33,6 +37,10 @@ export function RecordSet() {
   const [status, setStatus] = useState<'idle' | 'live' | 'stopped'>('idle');
   const [stopReason, setStopReason] = useState<SetStopReason | undefined>();
   const [streamErr, setStreamErr] = useState<string | null>(null);
+  const [markerPoint, setMarkerPoint] = useState<{ x: number; y: number } | null>(null);
+  const [trackingState, setTrackingState] = useState<
+    'simulated' | 'needs_marker' | 'acquiring' | 'tracking' | 'lost'
+  >('simulated');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const handleRef = useRef<LiveAnalyzerHandle | null>(null);
@@ -89,34 +97,55 @@ export function RecordSet() {
   async function startRecording() {
     setStreamErr(null);
     setReps([]);
-    setStatus('live');
     setStopReason(undefined);
 
     await unlockAudio();
 
-    engineRef.current = createSetEngine({ target: activeSet!.target });
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      if (useRealCvExperimental && !streamRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false,
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
       }
     } catch (err) {
       setStreamErr(
-        'Camera not available — running with simulated reps for dev. ' +
+        'Camera not available - running with simulated reps for dev. ' +
           (err instanceof Error ? err.message : ''),
       );
     }
 
-    const analyzer = createSimulatedLiveAnalyzer();
+    const canUseRealCv = useRealCvExperimental && Boolean(streamRef.current);
+
+    if (canUseRealCv && !markerPoint) {
+      setTrackingState('needs_marker');
+      setStreamErr('Tap the sleeve-end marker in the camera preview, then start the set.');
+      return;
+    }
+
+    setStatus('live');
+    setTrackingState(canUseRealCv ? 'acquiring' : 'simulated');
+    engineRef.current = createSetEngine({ target: activeSet!.target });
+
+    const analyzer: LiveAnalyzer = canUseRealCv
+      ? createRealLiveAnalyzer()
+      : createSimulatedLiveAnalyzer();
     const handle = await analyzer.start(
       {
         liftId: activeSet!.liftId,
         stream: streamRef.current ?? undefined,
+        realCv: canUseRealCv
+          ? {
+              markerDiameterMm,
+              markerProfile,
+              acquisitionPoint: markerPoint ?? undefined,
+              debug: true,
+            }
+          : undefined,
         synthetic: {
           repCount: activeSet!.plannedReps ?? 5,
           startVelocity:
@@ -140,12 +169,30 @@ export function RecordSet() {
           if (stopEv && stopEv.type === 'STOP_SET') {
             await finishSet(stopEv.reason);
           }
+        } else if (e.type === 'tracking_lost') {
+          setTrackingState('lost');
+        } else if (e.type === 'tracking_restored') {
+          setTrackingState('tracking');
+        } else if (e.type === 'debug') {
+          setTrackingState(e.frame.state);
         } else if (e.type === 'ended' && e.reason === 'no_motion') {
           await finishSet('complete');
         }
       },
     );
     handleRef.current = handle;
+  }
+
+  function handlePreviewTap(e: PointerEvent<HTMLVideoElement>) {
+    if (!useRealCvExperimental || status !== 'idle') return;
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+    const rect = video.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * video.videoWidth;
+    const y = ((e.clientY - rect.top) / rect.height) * video.videoHeight;
+    setMarkerPoint({ x, y });
+    setTrackingState('acquiring');
+    setStreamErr('Marker selected. Start the set when the bar is still.');
   }
 
   async function stopByUser() {
@@ -158,6 +205,7 @@ export function RecordSet() {
     setStopReason(reason);
     await handleRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
 
     const engine = engineRef.current;
@@ -202,7 +250,16 @@ export function RecordSet() {
 
       <section className="card stack">
         <div className="video-frame">
-          <video ref={videoRef} playsInline muted autoPlay />
+          <video ref={videoRef} playsInline muted autoPlay onPointerDown={handlePreviewTap} />
+          {markerPoint && useRealCvExperimental && videoRef.current && (
+            <span
+              className="marker-reticle"
+              style={{
+                left: `${(markerPoint.x / Math.max(1, videoRef.current.videoWidth)) * 100}%`,
+                top: `${(markerPoint.y / Math.max(1, videoRef.current.videoHeight)) * 100}%`,
+              }}
+            />
+          )}
           <div className="video-overlay">
             <span className="status-pill">
               {activeSet.target.kind === 'range'
@@ -213,6 +270,11 @@ export function RecordSet() {
           </div>
         </div>
         {streamErr && <div className="muted-note">{streamErr}</div>}
+        {useRealCvExperimental && (
+          <div className="muted-note">
+            Real CV: {trackingState.replace('_', ' ')} - {markerDiameterMm} mm {markerProfile.replace('_', ' ')}
+          </div>
+        )}
       </section>
 
       <section className="card stack">
@@ -234,7 +296,13 @@ export function RecordSet() {
 
       {status === 'idle' && (
         <button className="btn primary block" onClick={startRecording}>
-          Start recording
+          {!useRealCvExperimental
+            ? 'Start simulated set'
+            : !streamRef.current
+            ? 'Open camera'
+            : streamRef.current && !markerPoint
+              ? 'Start after tapping marker'
+              : 'Start recording'}
         </button>
       )}
       {status === 'live' && (

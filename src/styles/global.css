@@ -145,6 +145,23 @@ label input, label select {
   padding: 12px 14px;
 }
 
+.toggle-row {
+  flex-direction: row;
+  align-items: center;
+}
+
+.toggle-row input {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--accent);
+}
+
+.toggle-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .tile-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -293,6 +310,16 @@ label input, label select {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.marker-reticle {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
 .muted-note {
